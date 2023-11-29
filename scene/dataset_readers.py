@@ -11,6 +11,7 @@
 
 import os
 import sys
+import yaml
 from PIL import Image
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
@@ -22,6 +23,8 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+
+from typing import Union, List
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -145,7 +148,17 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
     cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
-    if eval:
+    split_config_path = os.path.join(path, "split.yaml")
+    if os.path.exists(split_config_path):
+        if eval and llffhold:
+            raise ValueError("Found explicit train/test split which incompatible to defining holdout rate")
+        with open(split_config_path, 'r') as file:
+            train_test_split = yaml.safe_load(file)
+        train_cam_infos = [c for c in cam_infos if c.image_name in train_test_split["train"]]
+        test_cam_infos = [c for c in cam_infos if c.image_name in train_test_split["test"]]
+        assert len(train_cam_infos) + len(test_cam_infos) == len(cam_infos), "Missing or duplicate cameras found!"
+
+    elif eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
