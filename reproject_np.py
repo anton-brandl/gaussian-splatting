@@ -9,31 +9,31 @@ import time
 
 
 @click.command()
-@click.argument('model_path', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
-@click.argument('images_path', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
-@click.argument('source_depth_path', type=click.Path(file_okay=True, dir_okay=False))
-@click.argument('target_depth_path', type=click.Path(file_okay=True, dir_okay=False))
-@click.argument('source_image_id', type=int)
-@click.argument('target_image_id', type=int)
+@click.argument('model_folder', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
+@click.argument('images_folder', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
+@click.argument('source_depth_folder', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
+@click.argument('target_depth_folder', type=click.Path(file_okay=False, dir_okay=True, path_type=Path))
+@click.argument('source_image_name', type=str)
+@click.argument('target_image_name', type=str)
 @click.option('--depth_diff_thresh', type=float, default=0.1, help='Threshold of relative difference in reprojected and target depth for inpainting mask')
-def reproject(model_path, images_path, source_depth_path, target_depth_path, source_image_id, target_image_id, depth_diff_thresh=0.1):
+def reproject(model_folder, images_folder, source_depth_folder, target_depth_folder, source_image_name, target_image_name, depth_diff_thresh=0.1):
     start_time = time.time()
 
-    cameras, images, _ = colmap.read_model(model_path)
+    cameras, images, _ = colmap.read_model(model_folder)
 
-    source_depthmap = np.load(source_depth_path)[0]
-    target_depthmap = np.load(target_depth_path)[0]
+    source_depthmap = np.load(source_depth_folder/(source_image_name+'.npy'))[0]
+    target_depthmap = np.load(target_depth_folder/(target_image_name+'.npy'))[0]
 
     # Get camera parameters for source and target images
-    source_image = images[source_image_id]  # IDs are 1-indexed
-    target_image = images[target_image_id]
+    source_image = [i for i in images.values() if i.name==source_image_name+'.png'][0]  # IDs are 1-indexed
+    target_image = [i for i in images.values() if i.name==target_image_name+'.png'][0]
 
     source_camera = cameras[source_image.camera_id] 
     target_camera = cameras[target_image.camera_id]
 
     # Load image data
-    source_img = cv2.imread(str(images_path / source_image.name))
-    target_img = cv2.imread(str(images_path / target_image.name))
+    source_img = cv2.imread(str(images_folder / source_image.name))
+    target_img = cv2.imread(str(images_folder / target_image.name))
 
     r0 = np.arange(source_img.shape[0])
     r1 = np.arange(source_img.shape[1])
@@ -142,6 +142,8 @@ def reproject(model_path, images_path, source_depth_path, target_depth_path, sou
     s = time.time()
     cv2.imwrite('output/reprojected.png', novel_view)
     cv2.imwrite('output/target.png', target_img)
+    cv2.imwrite('output/source.png', source_img)
+    cv2.imwrite('output/source_depth.png', (source_depthmap/20*255).astype(np.uint8))
     cv2.imwrite('output/inpainting_mask.png', inpainting_mask)
     cv2.imwrite('output/inpainting_mask_l.png', larger_inpainting_mask)
     cv2.imwrite('output/inpainted_view.png', inpainted_image)

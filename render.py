@@ -36,10 +36,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         rendered_image = rendering["render"]
         rendered_depth = rendering["depth"]
         gt = view.original_image[0:3, :, :]
-        torchvision.utils.save_image(rendered_image, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(rendered_depth/25, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
-        with open(os.path.join(depth_path, '{0:05d}'.format(idx) + ".npy"), 'wb') as fp:
+        torchvision.utils.save_image(rendered_image, os.path.join(render_path, f"{view.image_name}.png"))
+        torchvision.utils.save_image(gt, os.path.join(gts_path, f"{view.image_name}.png"))
+        torchvision.utils.save_image(rendered_depth/25, os.path.join(depth_path, f"{view.image_name}.png"))
+        with open(os.path.join(depth_path, f"{view.image_name}.npy"), 'wb') as fp:
             np.save(fp, rendered_depth.cpu())
 
 
