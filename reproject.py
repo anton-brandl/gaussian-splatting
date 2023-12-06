@@ -3,8 +3,9 @@ import colmap_utils as colmap
 from pathlib import Path
 from tqdm import tqdm
 
-import imageio
+import cv2
 import click
+import time
 
 
 @click.command()
@@ -16,6 +17,7 @@ import click
 @click.argument('target_image_id', type=int)
 @click.option('--depth_diff_thresh', type=float, default=0.1, help='Threshold of relative difference in reprojected and target depth for inpainting mask')
 def reproject(model_path, images_path, source_depth_path, target_depth_path, source_image_id, target_image_id, depth_diff_thresh=0.1):
+    start_time = time.time()
 
     cameras, images, _ = colmap.read_model(model_path)
 
@@ -30,8 +32,8 @@ def reproject(model_path, images_path, source_depth_path, target_depth_path, sou
     target_camera = cameras[target_image.camera_id]
 
     # Load image data
-    source_img = imageio.imread(images_path / source_image.name)
-    target_img = imageio.imread(images_path / target_image.name)
+    source_img = cv2.imread(str(images_path / source_image.name))
+    target_img = cv2.imread(str(images_path / target_image.name))
 
     points_source_pixel = []
 
@@ -118,18 +120,20 @@ def reproject(model_path, images_path, source_depth_path, target_depth_path, sou
     larger_inpainting_mask = ((inpainting_mask!=0) | (depth_diff>depth_diff_thresh) | (depth_diff<-depth_diff_thresh)).astype(np.uint8)*255
     inpainted_image_l = novel_view.copy()
     inpainted_image_l[larger_inpainting_mask!=0] = target_img[larger_inpainting_mask!=0]
+    end_time = time.time()
 
-    imageio.imwrite('output/reprojected.png', novel_view)
-    imageio.imwrite('output/target.png', target_img)
-    imageio.imwrite('output/inpainting_mask.png', inpainting_mask)
-    imageio.imwrite('output/inpainting_mask_l.png', larger_inpainting_mask)
-    imageio.imwrite('output/inpainted_view.png', inpainted_image)
-    imageio.imwrite('output/inpainted_view_l.png', inpainted_image_l)
-    imageio.imwrite('output/novel_depth.png', (novel_depth/20*255).astype(np.uint8))
-    imageio.imwrite('output/target_depth.png', (target_depthmap/20*255).astype(np.uint8))
-    imageio.imwrite('output/depth_diff.png', ((depth_diff-1)*150).astype(np.uint8))
-    imageio.imwrite('output/depth_diff_n.png', ((1-depth_diff)*150).astype(np.uint8))
+    cv2.imwrite('output/reprojected.png', novel_view)
+    cv2.imwrite('output/target.png', target_img)
+    cv2.imwrite('output/inpainting_mask.png', inpainting_mask)
+    cv2.imwrite('output/inpainting_mask_l.png', larger_inpainting_mask)
+    cv2.imwrite('output/inpainted_view.png', inpainted_image)
+    cv2.imwrite('output/inpainted_view_l.png', inpainted_image_l)
+    cv2.imwrite('output/novel_depth.png', (novel_depth/20*255).astype(np.uint8))
+    cv2.imwrite('output/target_depth.png', (target_depthmap/20*255).astype(np.uint8))
+    cv2.imwrite('output/depth_diff.png', ((depth_diff-1)*150).astype(np.uint8))
+    cv2.imwrite('output/depth_diff_n.png', ((1-depth_diff)*150).astype(np.uint8))
 
+    print(f"Finished within {(end_time-start_time)} seconds")
 
 if __name__ == "__main__":
     reproject()
