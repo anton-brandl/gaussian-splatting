@@ -16,7 +16,7 @@ import time
 @click.argument('source_image_name', type=str)
 @click.argument('target_image_name', type=str)
 @click.option('--depth_diff_thresh', type=float, default=0.1, help='Threshold of relative difference in reprojected and target depth for inpainting mask')
-def reproject(model_folder, images_folder, source_depth_folder, target_depth_folder, source_image_name, target_image_name, depth_diff_thresh=0.1):
+def reproject(model_folder, images_folder, source_depth_folder, target_depth_folder, source_image_name, target_image_name, depth_diff_thresh):
     start_time = time.time()
 
     cameras, images, _ = colmap.read_model(model_folder)
@@ -128,18 +128,15 @@ def reproject(model_folder, images_folder, source_depth_folder, target_depth_fol
     novel_depth[target_pixels[:,1], target_pixels[:,0]] = depth_vals
 
     depth_diff = (novel_depth-target_depthmap)/target_depthmap
-    depth_diff[inpainting_mask!=0] = 1
+    depth_diff[inpainting_mask!=0] = 0
 
     inpainted_image = novel_view.copy()
     inpainted_image[inpainting_mask!=0] = target_img[inpainting_mask!=0]
 
-    larger_inpainting_mask = ((inpainting_mask!=0) | (depth_diff>depth_diff_thresh) | (depth_diff<-depth_diff_thresh)).astype(np.uint8)*255
+    larger_inpainting_mask = ((inpainting_mask!=0) | (depth_diff>depth_diff_thresh) | (depth_diff>-depth_diff_thresh)).astype(np.uint8)*255
     inpainted_image_l = novel_view.copy()
     inpainted_image_l[larger_inpainting_mask!=0] = target_img[larger_inpainting_mask!=0]
-    end_time = time.time()
-    print(f"Finished within {(end_time-start_time)} seconds")
 
-    s = time.time()
     cv2.imwrite('output/reprojected.png', novel_view)
     cv2.imwrite('output/target.png', target_img)
     cv2.imwrite('output/source.png', source_img)
@@ -150,10 +147,11 @@ def reproject(model_folder, images_folder, source_depth_folder, target_depth_fol
     cv2.imwrite('output/inpainted_view_l.png', inpainted_image_l)
     cv2.imwrite('output/novel_depth.png', (novel_depth/20*255).astype(np.uint8))
     cv2.imwrite('output/target_depth.png', (target_depthmap/20*255).astype(np.uint8))
-    cv2.imwrite('output/depth_diff.png', ((depth_diff-1)*150).astype(np.uint8))
-    cv2.imwrite('output/depth_diff_n.png', ((1-depth_diff)*150).astype(np.uint8))
-    e = time.time()
-    print(f"But then writing takes {(e-s)} seconds")
+    cv2.imwrite('output/depth_diff.png', ((depth_diff)*3).astype(np.uint8))
+    cv2.imwrite('output/depth_diff_n.png', ((-depth_diff)*3).astype(np.uint8))
+
+    end_time = time.time()
+    print(f"Finished within {(end_time-start_time)} seconds")
 
 if __name__ == "__main__":
     reproject()
