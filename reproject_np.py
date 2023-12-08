@@ -19,7 +19,7 @@ def get_world2cam(qvec, tvec):
 
 
 def reproject_image(
-    source_image,
+    source_world2cam,
     source_depthmap,
     pixel2cam,
     cam2pixel,
@@ -29,7 +29,6 @@ def reproject_image(
     pixel_coordinates,
     depth_diff_thresh,
 ):
-    source_world2cam = get_world2cam(source_image.qvec, source_image.tvec)
     source_cam2world = np.linalg.inv(source_world2cam)
 
     depth_source = source_depthmap.flatten(order="F")
@@ -100,8 +99,9 @@ def reproject_image(
         | (depth_diff < -depth_diff_thresh)
     ).astype(np.uint8) * 255
 
-    novel_depth[inpainting_mask != 0] = 0
+    novel_depth[inpainting_mask_large != 0] = 0
 
+    novel_view[inpainting_mask_large !=0] = 0
     return novel_view, inpainting_mask_large, novel_depth
 
 
@@ -120,8 +120,9 @@ def reproject_image(
     "target_depth_folder",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
 )
-@click.argument("source_image_name", type=str)
 @click.argument("target_image_name", type=str)
+@click.argument("source_image_name1", type=str)
+@click.argument("source_image_name2", type=str)
 @click.option(
     "--depth_diff_thresh",
     type=float,
@@ -133,41 +134,52 @@ def reproject(
     images_folder,
     source_depth_folder,
     target_depth_folder,
-    source_image_name,
     target_image_name,
+    source_image_name1,
+    source_image_name2,
     depth_diff_thresh,
 ):
     start_time = time.time()
 
     cameras, images, _ = colmap.read_model(model_folder)
 
-    source_depthmap = np.load(source_depth_folder / (source_image_name + ".npy"))[0]
+    source_depthmap1 = np.load(source_depth_folder / (source_image_name1 + ".npy"))[0]
+    source_depthmap2 = np.load(source_depth_folder / (source_image_name2 + ".npy"))[0]
     target_depthmap = np.load(target_depth_folder / (target_image_name + ".npy"))[0]
 
     # Get camera parameters for source and target images
-    source_image = [i for i in images.values() if i.name == source_image_name + ".png"][
+    source_image1 = [i for i in images.values() if i.name == source_image_name1 + ".png"][
         0
-    ]  # IDs are 1-indexed
+    ]
+    source_image2 = [i for i in images.values() if i.name == source_image_name2 + ".png"][
+        0
+    ]
     target_image = [i for i in images.values() if i.name == target_image_name + ".png"][
         0
     ]
 
-    source_camera = cameras[source_image.camera_id]
+    source_camera1 = cameras[source_image1.camera_id]
+    source_camera2 = cameras[source_image2.camera_id]
     target_camera = cameras[target_image.camera_id]
 
+
+    source_world2cam1 = get_world2cam(source_image1.qvec, source_image1.tvec)
+    source_world2cam2 = get_world2cam(source_image2.qvec, source_image2.tvec)
+
     # Load image data
-    source_img = cv2.imread(str(images_folder / source_image.name))
+    source_img1 = cv2.imread(str(images_folder / source_image1.name))
+    source_img2 = cv2.imread(str(images_folder / source_image2.name))
     target_img = cv2.imread(str(images_folder / target_image.name))
 
-    r0 = np.arange(source_img.shape[0])
-    r1 = np.arange(source_img.shape[1])
+    r0 = np.arange(target_img.shape[0])
+    r1 = np.arange(target_img.shape[1])
     ys, xs = np.meshgrid(r0, r1)
     ys, xs = ys.flatten(), xs.flatten()
     pixel_coordinates = np.column_stack([xs, ys, np.ones_like(xs)])
 
     pixel_coordinates = pixel_coordinates.astype(np.float32)
     pixel_coordinates[:, :2] += 0.5
-    assert source_camera.model == target_camera.model == "PINHOLE"
+    assert source_camera1.model == target_camera.model == "PINHOLE"
 
     camera_intrinsics = target_camera.params
     scale = 1
@@ -184,33 +196,91 @@ def reproject(
     pixel2cam = np.linalg.inv(cam2pixel)
     target_world2cam = get_world2cam(target_image.qvec, target_image.tvec)
 
-    novel_view, inpainting_mask, novel_depth = reproject_image(
-        source_image,
-        source_depthmap,
+    cv2.imwrite("output/target.png", target_img)
+    cv2.imwrite(
+        "output/target_depth.png", (target_depthmap / 20 * 255).astype(np.uint8)
+    )
+
+
+    # Reproject Source image 1
+    novel_view1, inpainting_mask1, novel_depth1 = reproject_image(
+        source_world2cam1,
+        source_depthmap1,
         pixel2cam,
         cam2pixel,
         target_world2cam,
-        source_img,
+        source_img1,
         target_depthmap,
         pixel_coordinates,
         depth_diff_thresh,
     )
 
-    inpainted_image = novel_view.copy()
-    inpainted_image[inpainting_mask != 0] = target_img[inpainting_mask != 0]
+    inpainted_image1 = novel_view1.copy()
+    inpainted_image1[inpainting_mask1 != 0] = target_img[inpainting_mask1 != 0]
 
-    cv2.imwrite("output/reprojected.png", novel_view)
-    cv2.imwrite("output/target.png", target_img)
-    cv2.imwrite("output/source.png", source_img)
+    cv2.imwrite("output/source1.png", source_img1)
+    cv2.imwrite("output/reprojected1.png", novel_view1)
     cv2.imwrite(
-        "output/source_depth.png", (source_depthmap / 20 * 255).astype(np.uint8)
+        "output/source_depth1.png", (source_depthmap1 / 20 * 255).astype(np.uint8)
     )
-    cv2.imwrite("output/inpainting_mask.png", inpainting_mask)
-    cv2.imwrite("output/inpainted_view.png", inpainted_image)
-    cv2.imwrite("output/novel_depth.png", (novel_depth / 20 * 255).astype(np.uint8))
+    cv2.imwrite("output/inpainting_mask1.png", inpainting_mask1)
+    cv2.imwrite("output/inpainted_view1.png", inpainted_image1)
+    cv2.imwrite("output/novel_depth1.png", (novel_depth1 / 20 * 255).astype(np.uint8))
+
+
+    # Reproject Source image 2
+    novel_view2, inpainting_mask2, novel_depth2 = reproject_image(
+        source_world2cam2,
+        source_depthmap2,
+        pixel2cam,
+        cam2pixel,
+        target_world2cam,
+        source_img2,
+        target_depthmap,
+        pixel_coordinates,
+        depth_diff_thresh,
+    )
+
+    inpainted_image2 = novel_view2.copy()
+    inpainted_image2[inpainting_mask2 != 0] = target_img[inpainting_mask2 != 0]
+
+
+    cv2.imwrite("output/source2.png", source_img2)
+    cv2.imwrite("output/reprojected2.png", novel_view2)
     cv2.imwrite(
-        "output/target_depth.png", (target_depthmap / 20 * 255).astype(np.uint8)
+        "output/source_depth2.png", (source_depthmap2 / 20 * 255).astype(np.uint8)
     )
+    cv2.imwrite("output/inpainting_mask2.png", inpainting_mask2)
+    cv2.imwrite("output/inpainted_view2.png", inpainted_image2)
+    cv2.imwrite("output/novel_depth2.png", (novel_depth2 / 20 * 255).astype(np.uint8))
+
+
+
+
+    # Take all pixels from novel_view2 into novel_view1 where inpainting_mask1!=0 and inpainting_mask2==0
+    novel_view_combined = novel_view1.copy()
+    mask = (inpainting_mask1!=0) & (inpainting_mask2==0)
+    novel_view_combined[mask] = novel_view2[mask]
+    cv2.imwrite("output/novel_view_combined_intermediate1.png", novel_view_combined)
+
+    # Do depth ranking where inpainting_mask1==0 and inpainting_mask2==0
+    mask = (inpainting_mask1==0) & (inpainting_mask2==0)
+    depth_diff = novel_depth1[mask] - novel_depth2[mask]
+    mask[mask] = depth_diff > 0.2
+    novel_view_combined[mask] = novel_view2[mask]
+
+    cv2.imwrite("output/novel_view_combined_intermediate2.png", novel_view_combined)
+
+    # Do interpolation where depth is similar
+    mask = (inpainting_mask1==0) & (inpainting_mask2==0)
+    mask[mask] = (depth_diff < 0.2) & (depth_diff > -0.2)
+    novel_view_combined[mask] = novel_view1[mask]/2 + novel_view2[mask]/2 
+
+    cv2.imwrite("output/novel_view_combined.png", novel_view_combined)
+
+    inpainting_mask_combined = (inpainting_mask1!=0) & (inpainting_mask2!=0)
+    inpainting_mask_combined = inpainting_mask_combined.astype(np.uint8)*255
+    cv2.imwrite("output/inpainting_mask_combined.png", inpainting_mask_combined)
 
     end_time = time.time()
     print(f"Finished within {(end_time-start_time)} seconds")
