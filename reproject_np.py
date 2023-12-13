@@ -3,6 +3,8 @@ import colmap_utils as colmap
 from pathlib import Path
 from tqdm import tqdm
 import cv2
+from scipy import ndimage
+from scipy.interpolate import griddata
 
 import click
 import time
@@ -51,32 +53,32 @@ def reproject_image(
     pixel_coordinates = pixel_coordinates[:, :2].astype(np.uint16)
 
     # Removing invalid points (outside of target view)
-    coords_depth = np.concatenate(
+    coords_and_depth = np.concatenate(
         (points_target_pixel, pixel_coordinates, depth_target[:, np.newaxis]), axis=1
     )
-    coords_depth = coords_depth[
-        coords_depth[:, 0] >= 0
+    coords_and_depth = coords_and_depth[
+        coords_and_depth[:, 0] >= 0
     ]  # target x coord within image bounds
-    coords_depth = coords_depth[coords_depth[:, 0] < source_img.shape[1]]
+    coords_and_depth = coords_and_depth[coords_and_depth[:, 0] < source_img.shape[1]]
 
-    coords_depth = coords_depth[
-        coords_depth[:, 1] >= 0
+    coords_and_depth = coords_and_depth[
+        coords_and_depth[:, 1] >= 0
     ]  # target y coord within image bounds
-    coords_depth = coords_depth[coords_depth[:, 1] < source_img.shape[0]]
+    coords_and_depth = coords_and_depth[coords_and_depth[:, 1] < source_img.shape[0]]
 
     # Depth ranking
-    depth_rank = coords_depth[:, -1].argsort()
-    coords_depth = coords_depth[depth_rank]  # sorted by ascending depth
-    coords_depth_idx = np.unique(coords_depth[:, :2], axis=0, return_index=True)[1]
-    coords_depth = coords_depth[coords_depth_idx]
+    depth_rank = coords_and_depth[:, -1].argsort()
+    coords_and_depth = coords_and_depth[depth_rank]  # sorted by ascending depth
+    coords_depth_idx = np.unique(coords_and_depth[:, :2], axis=0, return_index=True)[1]
+    coords_and_depth = coords_and_depth[coords_depth_idx]
 
-    target_pixels = coords_depth[:, :2].astype(
+    target_pixels = coords_and_depth[:, :2].astype(
         np.uint16
     )  # x and y coordinates for target view
-    source_pixels = coords_depth[:, 2:4].astype(
+    source_pixels = coords_and_depth[:, 2:4].astype(
         np.uint16
     )  # x and y coordinates for target view
-    depth_vals = coords_depth[:, 4]
+    depth_vals = coords_and_depth[:, 4]
 
     inpainting_mask = np.ones_like(source_depthmap).astype(np.uint8) * 255
     inpainting_mask[
@@ -91,18 +93,49 @@ def reproject_image(
     novel_depth = np.zeros_like(source_depthmap)
     novel_depth[target_pixels[:, 1], target_pixels[:, 0]] = depth_vals
 
+    # Remove pixels where diff between target depthmap and reprojected depthmap is too large
+    # This helps remove single floating pixels around objects due to issues in depthmaps.
+    # Maybe rectifying the depthmap using depth estimation would be a better solution
     depth_diff = (novel_depth - target_depthmap) / target_depthmap
     depth_diff[inpainting_mask != 0] = 0
-    inpainting_mask_large = (
-        (inpainting_mask != 0)
-        | (depth_diff > depth_diff_thresh)
-        | (depth_diff < -depth_diff_thresh)
+    depth_okay = (depth_diff < depth_diff_thresh) & (depth_diff > -depth_diff_thresh)
+    inpainting_mask = ((inpainting_mask != 0) | (depth_okay == False)).astype(
+        np.uint8
+    ) * 255
+
+    # Interpolate pixel values to remove speckles
+    # Possible improvement: Use only values with similar depth value for interpolation
+    # TODO: Use also the interpolated!! depth value for doing the barycentric interpolation (3d interpolation). That avoids usage of the wrong depth
+    # But if using depth, be aware that it has a different dimensionality in pixel space: 1 depth unit is more than one pixel unit. Best to do it in euclidian space (pointcloud)
+    speckles = (
+        (ndimage.binary_closing(inpainting_mask == 0, structure=np.ones((4, 4))))
+        & inpainting_mask
+        != 0
     ).astype(np.uint8) * 255
+    speckle_coords = pixel_coordinates[
+        speckles[pixel_coordinates[:, 1], pixel_coordinates[:, 0]] == 255
+    ]
 
-    novel_depth[inpainting_mask_large != 0] = 0
+    non_speckle_ids = speckles[target_pixels[:, 1], target_pixels[:, 0]] == 0
+    #    speckle_ids = ~non_speckle_ids
+    source_pixels = source_pixels[non_speckle_ids]
+    target_pixels = target_pixels[non_speckle_ids]
+    depth_vals_nonspeckle = depth_vals[non_speckle_ids]
+    #    depth_vals_speckle = depth_vals[speckle_ids]
+    interp_d = griddata(target_pixels, depth_vals_nonspeckle, speckle_coords)
+    #    interp_rgb = griddata(np.hstack([target_pixels, depth_vals_nonspeckle[:,np.newaxis]]), source_img[source_pixels[:, 1], source_pixels[:, 0]], np.hstack([speckle_coords, interp_d[:,np.newaxis]]))
+    interp_rgb = griddata(
+        target_pixels,
+        source_img[source_pixels[:, 1], source_pixels[:, 0]],
+        speckle_coords,
+    )
+    novel_view[speckle_coords[:, 1], speckle_coords[:, 0]] = interp_rgb
+    novel_depth[speckle_coords[:, 1], speckle_coords[:, 0]] = interp_d
+    inpainting_mask[speckle_coords[:, 1], speckle_coords[:, 0]] = 0
 
-    novel_view[inpainting_mask_large !=0] = 0
-    return novel_view, inpainting_mask_large, novel_depth
+    novel_depth[inpainting_mask != 0] = 0
+    novel_view[inpainting_mask != 0] = 0
+    return novel_view, inpainting_mask, novel_depth
 
 
 @click.command()
@@ -148,12 +181,12 @@ def reproject(
     target_depthmap = np.load(target_depth_folder / (target_image_name + ".npy"))[0]
 
     # Get camera parameters for source and target images
-    source_image1 = [i for i in images.values() if i.name == source_image_name1 + ".png"][
-        0
-    ]
-    source_image2 = [i for i in images.values() if i.name == source_image_name2 + ".png"][
-        0
-    ]
+    source_image1 = [
+        i for i in images.values() if i.name == source_image_name1 + ".png"
+    ][0]
+    source_image2 = [
+        i for i in images.values() if i.name == source_image_name2 + ".png"
+    ][0]
     target_image = [i for i in images.values() if i.name == target_image_name + ".png"][
         0
     ]
@@ -161,7 +194,6 @@ def reproject(
     source_camera1 = cameras[source_image1.camera_id]
     source_camera2 = cameras[source_image2.camera_id]
     target_camera = cameras[target_image.camera_id]
-
 
     source_world2cam1 = get_world2cam(source_image1.qvec, source_image1.tvec)
     source_world2cam2 = get_world2cam(source_image2.qvec, source_image2.tvec)
@@ -201,7 +233,6 @@ def reproject(
         "output/target_depth.png", (target_depthmap / 20 * 255).astype(np.uint8)
     )
 
-
     # Reproject Source image 1
     novel_view1, inpainting_mask1, novel_depth1 = reproject_image(
         source_world2cam1,
@@ -227,7 +258,6 @@ def reproject(
     cv2.imwrite("output/inpainted_view1.png", inpainted_image1)
     cv2.imwrite("output/novel_depth1.png", (novel_depth1 / 20 * 255).astype(np.uint8))
 
-
     # Reproject Source image 2
     novel_view2, inpainting_mask2, novel_depth2 = reproject_image(
         source_world2cam2,
@@ -244,7 +274,6 @@ def reproject(
     inpainted_image2 = novel_view2.copy()
     inpainted_image2[inpainting_mask2 != 0] = target_img[inpainting_mask2 != 0]
 
-
     cv2.imwrite("output/source2.png", source_img2)
     cv2.imwrite("output/reprojected2.png", novel_view2)
     cv2.imwrite(
@@ -254,17 +283,14 @@ def reproject(
     cv2.imwrite("output/inpainted_view2.png", inpainted_image2)
     cv2.imwrite("output/novel_depth2.png", (novel_depth2 / 20 * 255).astype(np.uint8))
 
-
-
-
     # Take all pixels from novel_view2 into novel_view1 where inpainting_mask1!=0 and inpainting_mask2==0
     novel_view_combined = novel_view1.copy()
-    mask = (inpainting_mask1!=0) & (inpainting_mask2==0)
+    mask = (inpainting_mask1 != 0) & (inpainting_mask2 == 0)
     novel_view_combined[mask] = novel_view2[mask]
     cv2.imwrite("output/novel_view_combined_intermediate1.png", novel_view_combined)
 
     # Do depth ranking where inpainting_mask1==0 and inpainting_mask2==0
-    mask = (inpainting_mask1==0) & (inpainting_mask2==0)
+    mask = (inpainting_mask1 == 0) & (inpainting_mask2 == 0)
     depth_diff = novel_depth1[mask] - novel_depth2[mask]
     mask[mask] = depth_diff > 0.2
     novel_view_combined[mask] = novel_view2[mask]
@@ -272,14 +298,14 @@ def reproject(
     cv2.imwrite("output/novel_view_combined_intermediate2.png", novel_view_combined)
 
     # Do interpolation where depth is similar
-    mask = (inpainting_mask1==0) & (inpainting_mask2==0)
+    mask = (inpainting_mask1 == 0) & (inpainting_mask2 == 0)
     mask[mask] = (depth_diff < 0.2) & (depth_diff > -0.2)
-    novel_view_combined[mask] = novel_view1[mask]/2 + novel_view2[mask]/2 
+    novel_view_combined[mask] = novel_view1[mask] / 2 + novel_view2[mask] / 2
 
     cv2.imwrite("output/novel_view_combined.png", novel_view_combined)
 
-    inpainting_mask_combined = (inpainting_mask1!=0) & (inpainting_mask2!=0)
-    inpainting_mask_combined = inpainting_mask_combined.astype(np.uint8)*255
+    inpainting_mask_combined = (inpainting_mask1 != 0) & (inpainting_mask2 != 0)
+    inpainting_mask_combined = inpainting_mask_combined.astype(np.uint8) * 255
     cv2.imwrite("output/inpainting_mask_combined.png", inpainting_mask_combined)
 
     end_time = time.time()
